@@ -59,8 +59,8 @@ DATABASE_URL = os.getenv(
 )
 
 
-# Armazena temporariamente o state e o
-# code_verifier durante o processo OAuth.
+# Armazena temporariamente os dados do OAuth
+# durante o processo de login.
 
 oauth_sessions = {}
 
@@ -71,9 +71,7 @@ oauth_sessions = {}
 
 def get_database_url():
 
-    if DATABASE_URL.startswith(
-        "postgres://"
-    ):
+    if DATABASE_URL.startswith("postgres://"):
 
         return DATABASE_URL.replace(
             "postgres://",
@@ -100,6 +98,8 @@ def init_database():
 
         with conn.cursor() as cur:
 
+            # Cria a tabela caso ainda não exista.
+
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS ml_tokens (
 
@@ -119,6 +119,38 @@ def init_database():
 
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 )
+            """)
+
+            # IMPORTANTE:
+            # Se a tabela foi criada pela versão antiga
+            # do sistema, adiciona a coluna scope.
+
+            cur.execute("""
+                ALTER TABLE ml_tokens
+                ADD COLUMN IF NOT EXISTS scope TEXT
+            """)
+
+            # Garante também a coluna refresh_token
+            # caso a tabela antiga não possua.
+
+            cur.execute("""
+                ALTER TABLE ml_tokens
+                ADD COLUMN IF NOT EXISTS refresh_token TEXT
+            """)
+
+            # Garante a coluna token_type.
+
+            cur.execute("""
+                ALTER TABLE ml_tokens
+                ADD COLUMN IF NOT EXISTS token_type TEXT
+            """)
+
+            # Garante a coluna updated_at.
+
+            cur.execute("""
+                ALTER TABLE ml_tokens
+                ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ
+                DEFAULT NOW()
             """)
 
         conn.commit()
@@ -150,6 +182,47 @@ def make_pkce():
     )
 
     return verifier, challenge
+
+
+# ============================================================
+# LER TOKEN DO BANCO
+# ============================================================
+
+def get_saved_token():
+
+    if not DATABASE_URL:
+
+        raise Exception(
+            "DATABASE_URL não configurada."
+        )
+
+    with psycopg.connect(
+        get_database_url()
+    ) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute("""
+                SELECT
+
+                    user_id,
+
+                    access_token,
+
+                    refresh_token,
+
+                    token_type,
+
+                    expires_at,
+
+                    scope
+
+                FROM ml_tokens
+
+                WHERE id = 1
+            """)
+
+            return cur.fetchone()
 
 
 # ============================================================
@@ -201,30 +274,26 @@ def save_tokens(token_data):
     )
 
     # --------------------------------------------------------
-    # Se já existir um refresh_token no banco e a nova
-    # resposta não trouxer outro, preservamos o anterior.
+    # Caso o Mercado Livre não devolva um refresh_token,
+    # preservamos o último que já estiver no banco.
     # --------------------------------------------------------
-
-    old_refresh_token = None
-
-    try:
-
-        existing = get_saved_token()
-
-        if existing:
-
-            old_refresh_token = existing[2]
-
-    except Exception:
-
-        pass
 
     if not refresh_token:
 
-        refresh_token = old_refresh_token
+        try:
+
+            old_token = get_saved_token()
+
+            if old_token:
+
+                refresh_token = old_token[2]
+
+        except Exception:
+
+            pass
 
     # --------------------------------------------------------
-    # Grava no PostgreSQL
+    # Salva no PostgreSQL
     # --------------------------------------------------------
 
     with psycopg.connect(
@@ -300,15 +369,19 @@ def save_tokens(token_data):
         conn.commit()
 
     print(
-        "Token salvo no PostgreSQL."
+        "================================"
     )
 
     print(
-        f"user_id={user_id}"
+        "TOKEN SALVO"
     )
 
     print(
-        "refresh_token="
+        f"user_id: {user_id}"
+    )
+
+    print(
+        "refresh_token: "
         + (
             "SIM"
             if refresh_token
@@ -317,43 +390,12 @@ def save_tokens(token_data):
     )
 
     print(
-        f"scope={scope}"
+        f"scope: {scope}"
     )
 
-
-# ============================================================
-# LER TOKEN
-# ============================================================
-
-def get_saved_token():
-
-    with psycopg.connect(
-        get_database_url()
-    ) as conn:
-
-        with conn.cursor() as cur:
-
-            cur.execute("""
-                SELECT
-
-                    user_id,
-
-                    access_token,
-
-                    refresh_token,
-
-                    token_type,
-
-                    expires_at,
-
-                    scope
-
-                FROM ml_tokens
-
-                WHERE id = 1
-            """)
-
-            return cur.fetchone()
+    print(
+        "================================"
+    )
 
 
 # ============================================================
@@ -411,6 +453,7 @@ async def refresh_access_token():
             data=payload,
 
             headers={
+
                 "accept":
                     "application/json",
 
@@ -430,8 +473,8 @@ async def refresh_access_token():
         response.json()
     )
 
-    # O Mercado Livre deve devolver um
-    # novo refresh_token.
+    # O Mercado Livre devolve um novo
+    # refresh_token a cada renovação.
 
     if not new_token_data.get(
         "refresh_token"
@@ -481,7 +524,8 @@ async def get_access_token():
         timezone.utc
     )
 
-    # Renova 5 minutos antes da expiração.
+    # Renova cinco minutos antes
+    # da expiração.
 
     if expires_at <= (
         now + timedelta(
@@ -490,7 +534,7 @@ async def get_access_token():
     ):
 
         print(
-            "Token próximo de expirar."
+            "Access token próximo de expirar."
         )
 
         return await refresh_access_token()
@@ -511,7 +555,7 @@ def startup():
 
 
 # ============================================================
-# PÁGINA PRINCIPAL
+# HOME
 # ============================================================
 
 @app.get(
@@ -527,7 +571,9 @@ async def home():
 
     <head>
 
-        <title>Garimpo Tech</title>
+        <title>
+            Garimpo Tech
+        </title>
 
         <style>
 
@@ -656,17 +702,16 @@ async def home():
 )
 async def login():
 
-    # --------------------------------------------------------
-    # Verificações
-    # --------------------------------------------------------
+    # Verifica as variáveis.
 
     if not CLIENT_ID:
 
         return HTMLResponse(
             """
             <h1>Erro</h1>
+
             <p>
-            ML_CLIENT_ID não configurado.
+                ML_CLIENT_ID não configurado.
             </p>
             """,
             status_code=500
@@ -677,8 +722,9 @@ async def login():
         return HTMLResponse(
             """
             <h1>Erro</h1>
+
             <p>
-            ML_CLIENT_SECRET não configurado.
+                ML_CLIENT_SECRET não configurado.
             </p>
             """,
             status_code=500
@@ -689,8 +735,9 @@ async def login():
         return HTMLResponse(
             """
             <h1>Erro</h1>
+
             <p>
-            ML_REDIRECT_URI não configurado.
+                ML_REDIRECT_URI não configurado.
             </p>
             """,
             status_code=500
@@ -701,8 +748,9 @@ async def login():
         return HTMLResponse(
             """
             <h1>Erro</h1>
+
             <p>
-            DATABASE_URL não configurado.
+                DATABASE_URL não configurado.
             </p>
             """,
             status_code=500
@@ -731,7 +779,16 @@ async def login():
     }
 
     # --------------------------------------------------------
-    # AUTORIZAÇÃO
+    # SOLICITAÇÃO DE AUTORIZAÇÃO
+    # --------------------------------------------------------
+    #
+    # offline_access é o ponto importante:
+    # segundo a documentação do Mercado Livre,
+    # aplicações offline que precisam continuar
+    # atuando depois da expiração do access token
+    # devem solicitar esse escopo.
+    #
+    # read permite acesso somente de leitura.
     # --------------------------------------------------------
 
     params = {
@@ -765,6 +822,10 @@ async def login():
         f"{urlencode(params)}"
     )
 
+    print(
+        "Iniciando autorização Mercado Livre."
+    )
+
     return RedirectResponse(
         authorization_url
     )
@@ -787,7 +848,7 @@ async def oauth_callback(
 ):
 
     # --------------------------------------------------------
-    # Usuário cancelou
+    # Usuário cancelou.
     # --------------------------------------------------------
 
     if error:
@@ -811,7 +872,7 @@ async def oauth_callback(
         )
 
     # --------------------------------------------------------
-    # Valida code
+    # Verifica código.
     # --------------------------------------------------------
 
     if not code:
@@ -829,7 +890,7 @@ async def oauth_callback(
         )
 
     # --------------------------------------------------------
-    # Valida state
+    # Verifica state.
     # --------------------------------------------------------
 
     if not state:
@@ -869,7 +930,7 @@ async def oauth_callback(
     ]
 
     # --------------------------------------------------------
-    # TROCAR CODE POR TOKEN
+    # TROCA CODE POR TOKEN
     # --------------------------------------------------------
 
     payload = {
@@ -914,7 +975,7 @@ async def oauth_callback(
         )
 
     # --------------------------------------------------------
-    # Erro do Mercado Livre
+    # Erro do Mercado Livre.
     # --------------------------------------------------------
 
     if response.status_code >= 400:
@@ -931,7 +992,7 @@ async def oauth_callback(
             </p>
 
             <pre>
-            {response.text}
+{response.text}
             </pre>
 
             <a href="/">
@@ -946,7 +1007,7 @@ async def oauth_callback(
     )
 
     # --------------------------------------------------------
-    # Valida access token
+    # Verifica Access Token.
     # --------------------------------------------------------
 
     if not token_data.get(
@@ -958,8 +1019,8 @@ async def oauth_callback(
             <h1>Erro</h1>
 
             <p>
-                O Mercado Livre não
-                retornou access_token.
+                O Mercado Livre não retornou
+                access_token.
             </p>
             """,
             status_code=500
@@ -987,8 +1048,6 @@ async def oauth_callback(
                 {error}
             </p>
 
-            <br>
-
             <p>
                 Refresh token recebido:
                 {
@@ -999,8 +1058,6 @@ async def oauth_callback(
                     else "NÃO"
                 }
             </p>
-
-            <br>
 
             <a href="/">
                 Voltar
@@ -1013,8 +1070,21 @@ async def oauth_callback(
     # SUCESSO
     # --------------------------------------------------------
 
+    refresh_status = (
+        "SIM"
+        if token_data.get(
+            "refresh_token"
+        )
+        else "NÃO"
+    )
+
+    scope = token_data.get(
+        "scope",
+        "não informado"
+    )
+
     return HTMLResponse(
-        """
+        f"""
         <!DOCTYPE html>
 
         <html>
@@ -1045,7 +1115,7 @@ async def oauth_callback(
 
             <p>
                 Sua conta do Mercado Livre
-                foi conectada com sucesso.
+                foi conectada.
             </p>
 
             <p>
@@ -1053,8 +1123,17 @@ async def oauth_callback(
             </p>
 
             <p>
-                🔄 Renovação automática
-                preparada.
+                🔄 Renovação automática preparada.
+            </p>
+
+            <p>
+                Refresh Token:
+                <b>{refresh_status}</b>
+            </p>
+
+            <p>
+                Scope:
+                <b>{scope}</b>
             </p>
 
             <br>
@@ -1097,7 +1176,7 @@ async def oauth_callback(
 
 
 # ============================================================
-# VERIFICAR PERMISSÕES CONCEDIDAS
+# VERIFICAR PERMISSÕES
 # ============================================================
 
 @app.get(
@@ -1112,8 +1191,7 @@ async def verificar_permissoes():
         return {
 
             "erro":
-                "Nenhum token encontrado."
-
+                "Nenhum token encontrado no banco."
         }
 
     (
@@ -1126,7 +1204,7 @@ async def verificar_permissoes():
     ) = token
 
     # --------------------------------------------------------
-    # Consulta as aplicações autorizadas pelo usuário
+    # Consulta as aplicações autorizadas.
     # --------------------------------------------------------
 
     async with httpx.AsyncClient(
@@ -1294,10 +1372,6 @@ async def buscar(
     )
 ):
 
-    # --------------------------------------------------------
-    # Access token
-    # --------------------------------------------------------
-
     try:
 
         access_token = (
@@ -1311,10 +1385,6 @@ async def buscar(
             "erro":
                 str(error)
         }
-
-    # --------------------------------------------------------
-    # Busca
-    # --------------------------------------------------------
 
     params = {
 
@@ -1342,10 +1412,6 @@ async def buscar(
             }
         )
 
-    # --------------------------------------------------------
-    # Erro
-    # --------------------------------------------------------
-
     if response.status_code >= 400:
 
         return {
@@ -1363,10 +1429,6 @@ async def buscar(
     data = response.json()
 
     produtos = []
-
-    # --------------------------------------------------------
-    # Produtos
-    # --------------------------------------------------------
 
     for item in data.get(
         "results",
@@ -1436,7 +1498,8 @@ async def buscar(
             ),
 
         "quantidade_retornada":
-            len(produtos),
+            len(produtos
+            ),
 
         "produtos":
             produtos
