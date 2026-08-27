@@ -12,11 +12,6 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 app = FastAPI(title="Garimpo Tech")
 
-
-# =========================================================
-# CONFIGURAÇÕES
-# =========================================================
-
 ML_AUTH_URL = "https://auth.mercadolivre.com.br/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
@@ -29,14 +24,9 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 oauth_sessions = {}
 
 
-# =========================================================
-# BANCO DE DADOS
-# =========================================================
-
-def get_db_url():
+def db_url():
     if DATABASE_URL.startswith("postgres://"):
         return DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
     return DATABASE_URL
 
 
@@ -44,7 +34,7 @@ def init_database():
     if not DATABASE_URL:
         return
 
-    with psycopg.connect(get_db_url()) as conn:
+    with psycopg.connect(db_url()) as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS ml_tokens (
@@ -57,19 +47,12 @@ def init_database():
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
-
         conn.commit()
 
 
-# =========================================================
-# PKCE
-# =========================================================
-
 def make_pkce():
     verifier = secrets.token_urlsafe(64)
-
     digest = hashlib.sha256(verifier.encode()).digest()
-
     challenge = base64.urlsafe_b64encode(
         digest
     ).rstrip(b"=").decode()
@@ -77,27 +60,16 @@ def make_pkce():
     return verifier, challenge
 
 
-# =========================================================
-# TOKEN
-# =========================================================
-
-def save_tokens(token_data):
-    access_token = token_data["access_token"]
-    refresh_token = token_data["refresh_token"]
-
-    expires_in = int(token_data.get("expires_in", 21600))
+def save_tokens(data):
+    expires_in = int(data.get("expires_in", 21600))
 
     expires_at = (
         datetime.now(timezone.utc)
         + timedelta(seconds=expires_in)
     )
 
-    user_id = token_data.get("user_id")
-
-    with psycopg.connect(get_db_url()) as conn:
-
+    with psycopg.connect(db_url()) as conn:
         with conn.cursor() as cur:
-
             cur.execute("""
                 INSERT INTO ml_tokens
                 (
@@ -106,19 +78,11 @@ def save_tokens(token_data):
                     access_token,
                     refresh_token,
                     token_type,
-                    expires_at,
-                    updated_at
+                    expires_at
                 )
                 VALUES
-                (
-                    1,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    NOW()
-                )
+                (1, %s, %s, %s, %s, %s)
+
                 ON CONFLICT (id)
                 DO UPDATE SET
                     user_id = EXCLUDED.user_id,
@@ -128,10 +92,10 @@ def save_tokens(token_data):
                     expires_at = EXCLUDED.expires_at,
                     updated_at = NOW()
             """, (
-                user_id,
-                access_token,
-                refresh_token,
-                token_data.get("token_type", "Bearer"),
+                data.get("user_id"),
+                data["access_token"],
+                data["refresh_token"],
+                data.get("token_type", "Bearer"),
                 expires_at
             ))
 
@@ -139,11 +103,8 @@ def save_tokens(token_data):
 
 
 def get_saved_token():
-
-    with psycopg.connect(get_db_url()) as conn:
-
+    with psycopg.connect(db_url()) as conn:
         with conn.cursor() as cur:
-
             cur.execute("""
                 SELECT
                     user_id,
@@ -163,7 +124,9 @@ async def refresh_access_token():
     token = get_saved_token()
 
     if not token:
-        raise Exception("Mercado Livre ainda não foi conectado.")
+        raise Exception(
+            "Mercado Livre ainda não foi conectado."
+        )
 
     (
         user_id,
@@ -181,13 +144,13 @@ async def refresh_access_token():
     }
 
     async with httpx.AsyncClient(timeout=30) as client:
-
         response = await client.post(
             ML_TOKEN_URL,
             data=payload,
             headers={
                 "accept": "application/json",
-                "content-type": "application/x-www-form-urlencoded"
+                "content-type":
+                    "application/x-www-form-urlencoded"
             }
         )
 
@@ -198,8 +161,6 @@ async def refresh_access_token():
 
     data = response.json()
 
-    # O Mercado Livre pode devolver um novo refresh_token.
-    # Quando isso acontecer, substituímos o anterior.
     if not data.get("refresh_token"):
         data["refresh_token"] = old_refresh_token
 
@@ -229,97 +190,71 @@ async def get_access_token():
 
     now = datetime.now(timezone.utc)
 
-    # Renova automaticamente se faltarem menos de 5 minutos.
     if expires_at <= now + timedelta(minutes=5):
-
         return await refresh_access_token()
 
     return access_token
 
 
-# =========================================================
-# INÍCIO
-# =========================================================
-
 @app.on_event("startup")
 def startup():
-
     init_database()
 
-
-# =========================================================
-# HOME
-# =========================================================
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
 
     return """
     <html>
+    <head>
+        <title>Garimpo Tech</title>
+    </head>
 
-        <head>
-            <title>Garimpo Tech</title>
+    <body style="
+        font-family: Arial;
+        background: #111;
+        color: white;
+        text-align: center;
+        padding: 60px;
+    ">
 
-            <style>
+        <h1 style="color:#ffd400">
+            🚀 GARIMPO TECH
+        </h1>
 
-                body {
-                    font-family: Arial;
-                    background: #111;
-                    color: white;
-                    text-align: center;
-                    padding: 60px;
-                }
+        <h2>Motor de Ofertas</h2>
 
-                h1 {
-                    color: #ffd400;
-                    font-size: 42px;
-                }
+        <p>
+            Automação de ofertas do Mercado Livre.
+        </p>
 
-                a {
-                    display: inline-block;
-                    background: #ffd400;
-                    color: #111;
-                    padding: 15px 25px;
-                    border-radius: 8px;
-                    text-decoration: none;
-                    font-weight: bold;
-                }
+        <br>
 
-            </style>
+        <a href="/login"
+           style="
+           background:#ffd400;
+           color:#111;
+           padding:15px 25px;
+           border-radius:8px;
+           text-decoration:none;
+           font-weight:bold;
+           ">
+            Conectar Mercado Livre
+        </a>
 
-        </head>
+        <br><br>
 
-        <body>
+        <a href="/buscar?q=snow%20foam"
+           style="
+           color:#ffd400;
+           ">
+            🔎 Testar busca
+        </a>
 
-            <h1>🚀 GARIMPO TECH</h1>
-
-            <h2>Motor de Ofertas</h2>
-
-            <p>
-                Mercado Livre conectado ao Garimpo Tech.
-            </p>
-
-            <br>
-
-            <a href="/login">
-                Conectar Mercado Livre
-            </a>
-
-            <br><br>
-
-            <a href="/buscar?q=snow%20foam">
-                🔎 Testar busca
-            </a>
-
-        </body>
-
+    </body>
     </html>
     """
 
-
-# =========================================================
-# LOGIN MERCADO LIVRE
-# =========================================================
 
 @app.get("/login")
 async def login():
@@ -330,7 +265,6 @@ async def login():
         REDIRECT_URI,
         DATABASE_URL
     ]):
-
         return HTMLResponse(
             "<h1>Configuração incompleta</h1>"
             "<p>Verifique as variáveis do Railway.</p>",
@@ -362,10 +296,6 @@ async def login():
     return RedirectResponse(url)
 
 
-# =========================================================
-# CALLBACK OAUTH
-# =========================================================
-
 @app.get("/oauth/callback")
 async def oauth_callback(
     code: str = None,
@@ -373,7 +303,6 @@ async def oauth_callback(
 ):
 
     if not code or not state:
-
         return HTMLResponse(
             "<h1>Erro</h1>"
             "<p>Código de autorização não recebido.</p>",
@@ -381,7 +310,6 @@ async def oauth_callback(
         )
 
     if state not in oauth_sessions:
-
         return HTMLResponse(
             "<h1>Erro de segurança</h1>"
             "<p>Estado OAuth inválido.</p>",
@@ -400,18 +328,17 @@ async def oauth_callback(
     }
 
     async with httpx.AsyncClient(timeout=30) as client:
-
         response = await client.post(
             ML_TOKEN_URL,
             data=payload,
             headers={
                 "accept": "application/json",
-                "content-type": "application/x-www-form-urlencoded"
+                "content-type":
+                    "application/x-www-form-urlencoded"
             }
         )
 
     if response.status_code >= 400:
-
         return HTMLResponse(
             "<h1>Erro ao obter autorização</h1>"
             f"<pre>{response.text}</pre>",
@@ -420,82 +347,64 @@ async def oauth_callback(
 
     token_data = response.json()
 
-    # Salva os tokens no PostgreSQL.
     save_tokens(token_data)
 
-    return HTMLResponse(
-        """
-        <html>
+    return HTMLResponse("""
+    <html>
 
-            <body
-                style="
-                font-family:Arial;
-                text-align:center;
-                padding:60px;
-                background:#111;
-                color:white;
-                "
-            >
+    <body style="
+        font-family:Arial;
+        text-align:center;
+        padding:60px;
+        background:#111;
+        color:white;
+    ">
 
-                <h1 style="color:#ffd400">
-                    ✅ GARIMPO TECH CONECTADO!
-                </h1>
+        <h1 style="color:#ffd400">
+            ✅ GARIMPO TECH CONECTADO!
+        </h1>
 
-                <p>
-                    A conta do Mercado Livre foi conectada
-                    com sucesso.
-                </p>
+        <p>
+            Sua conta do Mercado Livre está conectada.
+        </p>
 
-                <p>
-                    🔐 Tokens armazenados com segurança.
-                </p>
+        <p>
+            🔐 Token armazenado no banco.
+        </p>
 
-                <p>
-                    🔄 Renovação automática habilitada.
-                </p>
+        <p>
+            🔄 Renovação automática habilitada.
+        </p>
 
-                <br>
+        <br>
 
-                <a
-                    href="/buscar?q=snow%20foam"
-                    style="
-                    background:#ffd400;
-                    color:#111;
-                    padding:15px 25px;
-                    text-decoration:none;
-                    border-radius:8px;
-                    font-weight:bold;
-                    "
-                >
-                    🔎 Testar busca no Mercado Livre
-                </a>
+        <a href="/buscar?q=snow%20foam"
+           style="
+           background:#ffd400;
+           color:#111;
+           padding:15px 25px;
+           text-decoration:none;
+           border-radius:8px;
+           font-weight:bold;
+           ">
+            🔎 Testar busca
+        </a>
 
-            </body>
+    </body>
 
-        </html>
-        """
-    )
+    </html>
+    """)
 
-
-# =========================================================
-# BUSCAR PRODUTOS
-# =========================================================
 
 @app.get("/buscar")
 async def buscar(
-    q: str = Query(
-        ...,
-        min_length=2,
-        description="Produto que deseja pesquisar"
-    )
+    q: str = Query(..., min_length=2)
 ):
 
     try:
-
         access_token = await get_access_token()
 
     except Exception as error:
-
         return {
             "erro": str(error)
         }
@@ -512,12 +421,11 @@ async def buscar(
             params=params,
             headers={
                 "Authorization":
-                f"Bearer {access_token}"
+                    f"Bearer {access_token}"
             }
         )
 
     if response.status_code >= 400:
-
         return {
             "erro": "Erro na API do Mercado Livre",
             "status": response.status_code,
@@ -531,31 +439,21 @@ async def buscar(
     for item in data.get("results", []):
 
         produtos.append({
-
             "id": item.get("id"),
-
             "titulo": item.get("title"),
-
             "preco": item.get("price"),
-
             "preco_original":
                 item.get("original_price"),
-
             "disponibilidade":
                 item.get("available_quantity"),
-
             "vendidos":
                 item.get("sold_quantity"),
-
             "categoria":
                 item.get("category_id"),
-
             "link":
                 item.get("permalink"),
-
             "imagem":
                 item.get("thumbnail")
-
         })
 
     return {
